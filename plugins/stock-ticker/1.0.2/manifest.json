@@ -1,7 +1,6 @@
 {
   "pluginId": "1773679396853",
   "name": "Stock Ticker",
-  "description": "",
   "version": "1.0.2",
   "types": [
     "stock-ticker"
