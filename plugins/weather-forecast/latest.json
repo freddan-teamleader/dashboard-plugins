@@ -1,6 +1,6 @@
 {
   "pluginId": "1773660607851",
-  "name": "Generated Plugin",
+  "name": "Weather Forecast",
   "version": "1.30.0",
   "types": [
     "weather-widget"
