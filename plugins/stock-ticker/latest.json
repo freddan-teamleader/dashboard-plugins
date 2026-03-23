@@ -1,0 +1,10 @@
+{
+  "pluginId": "1773679396853",
+  "name": "Stock Ticker",
+  "version": "1.0.1",
+  "types": [
+    "stock-ticker"
+  ],
+  "serviceTypes": [],
+  "updatedAt": "2026-03-23T16:25:11.558Z"
+}
