@@ -1,0 +1,11 @@
+{
+  "pluginId": "1773660607851",
+  "name": "Generated Plugin",
+  "description": "",
+  "version": "1.30.0",
+  "types": [
+    "weather-widget"
+  ],
+  "serviceTypes": [],
+  "savedAt": "2026-03-23T14:51:15.120Z"
+}
