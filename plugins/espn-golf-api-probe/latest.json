@@ -1,10 +1,10 @@
 {
   "pluginId": "1775757339014",
   "name": "ESPN Golf API Probe",
-  "version": "1.2.0",
+  "version": "1.2.2",
   "types": [
     "espn-golf-probe"
   ],
   "serviceTypes": [],
-  "updatedAt": "2026-04-09T18:17:56.773Z"
+  "updatedAt": "2026-04-09T18:22:31.455Z"
 }
