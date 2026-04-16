@@ -1,0 +1,11 @@
+{
+  "pluginId": "0e373f2e-6c23-49b5-ae99-8c395e33a7a6",
+  "name": "🧪 DB API Test",
+  "description": "",
+  "version": "1.0.0",
+  "types": [
+    "db-api-test"
+  ],
+  "serviceTypes": [],
+  "savedAt": "2026-04-16T20:18:15.320Z"
+}
