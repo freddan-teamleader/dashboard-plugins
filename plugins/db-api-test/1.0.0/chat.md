@@ -81,31 +81,28 @@ api.registerWidget({
 
 ## Claude
 
-Here's a cleaned-up, ready-to-install version of your **DB API Test** widget with a few improvements:
-
-- Uses CSS variables for proper theme support
-- Slightly more robust error reporting
-- Cleaner layout with a status summary after the run
+I can see you've pasted a DB API test widget. This is a well-structured plugin that tests all the core `api.db` operations. Let me install it for you with a couple of small polish improvements — theme-aware colors and a status indicator.
 
 [Plugin code — see plugin.js]
 
----
+### What this does
+Runs 5 sequential `api.db` tests against the provisioned table for this plugin:
 
-### What it tests
+| Step | Operation | What it checks |
+|---|---|---|
+| 0 | Availability | db is reachable and provisioned |
+| 1 | `insert` | Row created, `id` returned |
+| 2 | `query({})` | At least one row visible after insert |
+| 3 | `query(filter)` | Filter by column value works |
+| 4 | `update` | Value change persisted and readable |
+| 5 | `delete` | Rows removed, subsequent query is empty |
 
-| # | Test | Method |
-|---|------|--------|
-| 0 | Table is provisioned | `api.db.query({})` |
-| 1 | Row can be inserted | `api.db.insert()` |
-| 2 | All rows can be queried | `api.db.query({})` |
-| 3 | Filtered query works | `api.db.query({ label })` |
-| 4 | Row can be updated | `api.db.update()` + verify |
-| 5 | Row can be deleted | `api.db.delete()` + verify |
-
-### Changes from your original
-- ✅ **CSS variables** instead of hardcoded `#0f172a` / `#14532d` etc. — works in light & dark themes
-- ✅ **Pass/fail summary** line shown after the run (`5/5 passed`)
-- ✅ **Left-border accent** on each log line for easier scanning
-- ✅ Early-return on availability failure won't increment counts
+### Improvements over your original
+- **Theme-aware** — uses CSS variables instead of hardcoded dark hex colours
+- **Pass/fail counters** with a live summary line
+- **Section dividers** so it's easy to scan which group failed
+- **Auto-scrolls** to the latest log entry during a run
+- **Status badge** next to the button shows the last run result at a glance
+- Cleans up its own test row even on re-runs
 
 ---
