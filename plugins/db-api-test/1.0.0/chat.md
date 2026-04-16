@@ -6,6 +6,77 @@
 
 ## You
 
+{
+  "event_message": "shutdown",
+  "id": "4b20c163-64e7-4392-b92a-36f572a8c69f",
+  "metadata": [
+    {
+      "boot_time": null,
+      "cpu_time_used": 30,
+      "deployment_id": "lirsyccavfuglkcxlhby_ecdb0fe2-4f2d-4712-9619-b4a2c6b3b25a_2",
+      "event_type": "Shutdown",
+      "execution_id": "fb00f284-fa03-4e48-a640-56e2488d1d61",
+      "function_id": "ecdb0fe2-4f2d-4712-9619-b4a2c6b3b25a",
+      "level": "log",
+      "memory_used": [
+        {
+          "external": 3029389,
+          "heap": 8169144,
+          "mem_check_captured": null,
+          "total": 11198533
+        }
+      ],
+      "project_ref": "lirsyccavfuglkcxlhby",
+      "reason": "EarlyDrop",
+      "region": "eu-central-1",
+      "served_by": "supabase-edge-runtime-1.73.3 (compatible with Deno v2.1.4)",
+      "timestamp": "2026-04-16T20:12:13.052Z",
+      "version": "2"
+    }
+  ],
+  "timestamp": 1776370333052000
+}
+
+---
+
+## Claude
+
+This looks like a **Supabase Edge Function log event** — specifically a shutdown/lifecycle event from your edge runtime. This isn't a plugin request, but I can help you make sense of it!
+
+## 📋 Event Summary
+
+| Field | Value |
+|---|---|
+| **Event** | `shutdown` |
+| **Reason** | `EarlyDrop` |
+| **Function ID** | `ecdb0fe2-4f2d-4712-9619-b4a2c6b3b25a` |
+| **Region** | `eu-central-1` |
+| **Timestamp** | `2026-04-16T20:12:13.052Z` |
+| **Runtime** | Supabase Edge Runtime 1.73.3 (Deno v2.1.4) |
+
+## 🔍 What does `EarlyDrop` mean?
+
+`EarlyDrop` means the Edge Function was **terminated before it finished executing**. Common causes:
+
+1. **Timeout** — The function exceeded its execution time limit
+2. **Memory limit exceeded** — Though your memory usage looks modest (`~11 MB`)
+3. **Unhandled exception** — A crash caused the runtime to drop the function early
+4. **Client disconnected** — The caller hung up before the function responded
+
+## 📊 Resource Usage
+
+[Plugin code — see plugin.js]
+
+Since CPU and memory usage are both low, the `EarlyDrop` was most likely caused by a **client disconnect** or a **runtime-level abort** rather than a resource exhaustion issue.
+
+---
+
+Would you like me to build a **dashboard widget** that monitors your Supabase Edge Function logs and flags `EarlyDrop` or other anomalous shutdown events in real time? 🚀
+
+---
+
+## You
+
 api.registerWidget({
   type: 'db-api-test',
   title: '🧪 DB API Test',
@@ -81,20 +152,46 @@ api.registerWidget({
 
 ## Claude
 
-Here's a polished, theme-aware version of your DB API test widget:
+It looks like you've pasted a **DB API Test widget** — a diagnostic plugin that tests all `api.db` operations (insert, query, filter, update, delete).
+
+Would you like me to:
+
+1. **Install it as-is** — it looks complete and ready to run
+2. **Enhance it** — e.g. add timing measurements, auto-run on load, export results, or better styling with CSS variables (it currently hardcodes dark colors)
+3. **Debug a specific failure** — if you ran this and got an error, paste the output and I'll help diagnose it
+
+---
+
+### What this widget tests
+
+| Step | Operation | Pass condition |
+|---|---|---|
+| 0 | `api.db.query({})` | No "not available" error |
+| 1 | `api.db.insert(…)` | Returns a row with an `id` |
+| 2 | `api.db.query({})` | Returns ≥ 1 row |
+| 3 | `api.db.query({ label: 'test-row' })` | Filtered results returned |
+| 4 | `api.db.update(…)` + re-query | `value` equals `99` |
+| 5 | `api.db.delete(…)` + re-query | 0 rows remain |
+
+Just let me know what you'd like to do! 🧪
+
+---
+
+## You
+
+Create a widget from the code I gave you
+
+---
+
+## Claude
 
 [Plugin code — see plugin.js]
 
-### What changed
+Here's your widget, ready to install! Click **Run tests** to execute all 5 `api.db` operations in sequence. Results are color-coded:
 
-| Area | Before | After |
-|---|---|---|
-| **Colors** | Hardcoded `#0f172a`, `#14532d`, `#450a0a` | CSS variables — works in light & dark themes |
-| **Log rows** | Plain bg/text only | Coloured left-border + subtle tinted bg for ok / fail / info states |
-| **Section headers** | Absent | `info`-state `→` lines separate each test group for readability |
-| **Summary line** | None | Shows total tests · passed · failed · elapsed ms after the run |
-| **Button state** | `disabled = true` only | Shows `⏳ Running…` during run, restores to `▶ Run again` after |
-| **Auto-scroll** | None | Each new log line scrolls into view |
-| **Layout** | Fixed `background:#0f172a` | Flex column, adapts to container height |
+- 🟢 **Green** — operation passed
+- 🔴 **Red** — operation failed, with details
+
+If step 0 fails with "not available", it means the `api.db` Edge Function isn't provisioned for this plugin yet — everything else is skipped in that case.
 
 ---
