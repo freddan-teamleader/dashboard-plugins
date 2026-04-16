@@ -1,3 +1,4 @@
+// @bump: patch
 api.registerWidget({
   type: 'db-api-test',
   title: '🧪 DB API Test',
@@ -5,96 +6,123 @@ api.registerWidget({
   height: 400,
   render: async function(container, config) {
     container.innerHTML = `
-      <div style="padding:16px;background:var(--bg-secondary);height:100%;box-sizing:border-box;overflow:auto;display:flex;flex-direction:column;gap:8px">
-        <div style="color:var(--text-primary);font-weight:600;font-size:14px">api.db Integration Tests</div>
-        <div id="log" style="flex:1;display:flex;flex-direction:column;gap:3px"></div>
-        <div id="summary" style="font-size:12px;color:var(--text-muted);font-family:monospace"></div>
-        <button id="run" style="padding:8px 16px;background:var(--accent-blue);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;align-self:flex-start">
-          ▶ Run Tests
-        </button>
+      <div style="padding:16px;background:var(--bg-secondary);height:100%;box-sizing:border-box;overflow:auto;display:flex;flex-direction:column;gap:0">
+        <div style="color:var(--text-primary);font-weight:600;margin-bottom:12px;font-size:14px">
+          api.db Integration Tests
+        </div>
+        <div id="log" style="flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:2px"></div>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:12px">
+          <button id="run" style="padding:8px 20px;background:var(--accent-blue);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500">
+            ▶ Run Tests
+          </button>
+          <span id="status" style="font-size:12px;color:var(--text-muted)"></span>
+        </div>
       </div>`
 
-    const logEl     = container.querySelector('#log')
-    const summaryEl = container.querySelector('#summary')
-    const btn       = container.querySelector('#run')
-
-    const results = { pass: 0, fail: 0 }
+    const logEl    = container.querySelector('#log')
+    const runBtn   = container.querySelector('#run')
+    const statusEl = container.querySelector('#status')
 
     const log = (msg, ok = true) => {
-      ok ? results.pass++ : results.fail++
       const el = document.createElement('div')
-      el.style.cssText = `
-        padding:4px 10px;border-radius:4px;font-size:12px;font-family:monospace;
-        background:${ok ? 'rgba(74,222,128,0.1)' : 'rgba(255,107,107,0.1)'};
-        color:${ok ? 'var(--accent-green)' : 'var(--accent-red)'};
-        border-left:3px solid ${ok ? 'var(--accent-green)' : 'var(--accent-red)'}`
-      el.textContent = (ok ? '✓  ' : '✗  ') + msg
+      el.style.cssText = [
+        'padding:5px 10px',
+        'border-radius:5px',
+        'font-size:12px',
+        'font-family:monospace',
+        `background:${ok ? 'rgba(74,222,128,0.10)' : 'rgba(255,107,107,0.12)'}`,
+        `color:${ok ? 'var(--accent-green)' : 'var(--accent-red)'}`,
+        `border-left:3px solid ${ok ? 'var(--accent-green)' : 'var(--accent-red)'}`,
+      ].join(';')
+      el.textContent = (ok ? '✓ ' : '✗ ') + msg
       logEl.appendChild(el)
       el.scrollIntoView({ block: 'nearest' })
     }
 
-    btn.onclick = async () => {
+    const divider = (label) => {
+      const el = document.createElement('div')
+      el.style.cssText = 'padding:4px 0 2px;font-size:11px;color:var(--text-muted);font-family:monospace;letter-spacing:.05em'
+      el.textContent = `── ${label} ──`
+      logEl.appendChild(el)
+    }
+
+    runBtn.onclick = async () => {
       logEl.innerHTML = ''
-      summaryEl.textContent = ''
-      results.pass = 0
-      results.fail = 0
-      btn.disabled = true
-      btn.textContent = '⏳ Running…'
+      runBtn.disabled = true
+      runBtn.textContent = '⏳ Running…'
+      statusEl.textContent = ''
+
+      let passed = 0, failed = 0
+      const ok  = (msg) => { log(msg, true);  passed++ }
+      const err = (msg) => { log(msg, false); failed++ }
 
       try {
-        // 0. Availability check
+        // ── 0. Availability ──
+        divider('0 · availability')
         try {
           await api.db.query({})
-          log('api.db available — table provisioned')
-        } catch (e) {
-          log(`api.db not available: ${e.message}`, false)
-          summaryEl.textContent = 'Cannot continue — api.db is not provisioned.'
-          btn.disabled = false
-          btn.textContent = '▶ Run Tests'
-          return
+          ok('api.db is provisioned and reachable')
+        } catch(e) {
+          if (e.message?.includes('not available')) {
+            err('api.db not provisioned — Edge Function may not have run yet')
+            statusEl.textContent = '⚠ db not available'
+            runBtn.disabled = false
+            runBtn.textContent = '▶ Run Tests'
+            return
+          }
+          throw e
         }
 
-        // 1. Insert
-        const row = await api.db.insert({ label: 'test-row', value: 42 })
+        // ── 1. Insert ──
+        divider('1 · insert')
+        const row = await api.db.insert({ label: 'db-test', value: 42 })
         row?.id
-          ? log(`insert → id: ${row.id.slice(0, 8)}…`)
-          : log('insert: no id returned', false)
+          ? ok(`row inserted — id: ${row.id.slice(0, 8)}…`)
+          : err('insert returned no id')
 
-        // 2. Query all
+        // ── 2. Query all ──
+        divider('2 · query (no filter)')
         const all = await api.db.query({})
         all.length >= 1
-          ? log(`query {} → ${all.length} row(s)`)
-          : log('query {}: returned empty', false)
+          ? ok(`query returned ${all.length} row(s)`)
+          : err('query returned 0 rows after insert')
 
-        // 3. Query with filter
-        const filtered = await api.db.query({ label: 'test-row' })
+        // ── 3. Query with filter ──
+        divider('3 · query (filter)')
+        const filtered = await api.db.query({ label: 'db-test' })
         filtered.length >= 1
-          ? log(`query {label:"test-row"} → ${filtered.length} row(s)`)
-          : log('query {label:"test-row"}: no results', false)
+          ? ok(`filter {label:"db-test"} → ${filtered.length} row(s)`)
+          : err('filter returned no results')
 
-        // 4. Update
-        await api.db.update({ label: 'test-row' }, { value: 99 })
-        const updated = await api.db.query({ label: 'test-row' })
+        // ── 4. Update ──
+        divider('4 · update')
+        await api.db.update({ label: 'db-test' }, { value: 99 })
+        const updated = await api.db.query({ label: 'db-test' })
         updated[0]?.value === 99
-          ? log('update {value:99} → confirmed')
-          : log(`update: expected 99, got ${updated[0]?.value}`, false)
+          ? ok(`value updated: 42 → 99`)
+          : err(`value mismatch — got: ${updated[0]?.value}`)
 
-        // 5. Delete
-        await api.db.delete({ label: 'test-row' })
-        const afterDelete = await api.db.query({ label: 'test-row' })
+        // ── 5. Delete ──
+        divider('5 · delete')
+        await api.db.delete({ label: 'db-test' })
+        const afterDelete = await api.db.query({ label: 'db-test' })
         afterDelete.length === 0
-          ? log('delete → 0 rows remain')
-          : log(`delete: ${afterDelete.length} row(s) still present`, false)
+          ? ok('rows deleted — query returns empty')
+          : err(`${afterDelete.length} row(s) still present after delete`)
 
-      } catch (e) {
-        log(`unexpected error: ${e.message}`, false)
+      } catch(e) {
+        err(`unexpected error: ${e.message}`)
       }
 
-      const total = results.pass + results.fail
-      summaryEl.textContent = `${results.pass}/${total} passed  •  ${results.fail} failed`
-      summaryEl.style.color = results.fail === 0 ? 'var(--accent-green)' : 'var(--accent-red)'
-      btn.disabled = false
-      btn.textContent = '▶ Run Again'
+      // ── Summary ──
+      divider('summary')
+      const total = passed + failed
+      log(`${passed}/${total} tests passed`, failed === 0)
+      statusEl.style.color = failed === 0 ? 'var(--accent-green)' : 'var(--accent-red)'
+      statusEl.textContent  = failed === 0 ? `✓ All ${total} passed` : `✗ ${failed} failed`
+
+      runBtn.disabled = false
+      runBtn.textContent = '↺ Run Again'
     }
   }
 })
