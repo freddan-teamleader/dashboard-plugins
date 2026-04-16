@@ -1,0 +1,10 @@
+{
+  "pluginId": "bb510d63-97f9-466c-bc31-f29d8ff595f9",
+  "name": "🧪 Storage API Test",
+  "version": "1.0.0",
+  "types": [
+    "storage-api-test"
+  ],
+  "serviceTypes": [],
+  "updatedAt": "2026-04-16T20:11:01.359Z"
+}
