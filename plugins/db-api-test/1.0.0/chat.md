@@ -81,28 +81,27 @@ api.registerWidget({
 
 ## Claude
 
-I can see you've pasted a DB API test widget. This is a well-structured plugin that tests all the core `api.db` operations. Let me install it for you with a couple of small polish improvements — theme-aware colors and a status indicator.
+Here's the **DB API Test** widget — a diagnostic tool that runs a full CRUD test suite against `api.db`:
 
 [Plugin code — see plugin.js]
 
-### What this does
-Runs 5 sequential `api.db` tests against the provisioned table for this plugin:
+---
 
-| Step | Operation | What it checks |
-|---|---|---|
-| 0 | Availability | db is reachable and provisioned |
-| 1 | `insert` | Row created, `id` returned |
-| 2 | `query({})` | At least one row visible after insert |
-| 3 | `query(filter)` | Filter by column value works |
-| 4 | `update` | Value change persisted and readable |
-| 5 | `delete` | Rows removed, subsequent query is empty |
+### What it does
 
-### Improvements over your original
-- **Theme-aware** — uses CSS variables instead of hardcoded dark hex colours
-- **Pass/fail counters** with a live summary line
-- **Section dividers** so it's easy to scan which group failed
-- **Auto-scrolls** to the latest log entry during a run
-- **Status badge** next to the button shows the last run result at a glance
-- Cleans up its own test row even on re-runs
+Runs **7 test sections** against `api.db` and logs each result with ✓ / ✗ coloring:
+
+| # | Test |
+|---|------|
+| 0 | Availability check — detects unprovisioned DB gracefully |
+| 1 | `insert` — verifies row ID and returned fields |
+| 2 | `query({})` — no filter, counts all rows |
+| 3 | `query({ label })` — filtered query |
+| 4 | `query` with `orderBy` + `limit` options |
+| 5 | `update` — changes a field and re-queries |
+| 6 | Update side-effect — ensures unrelated fields are untouched |
+| 7 | `delete` — removes rows and verifies zero remain |
+
+Each log line includes the **response time in ms**. A summary at the bottom shows **N/total passed**. All test rows use the label `"db-test"` and are cleaned up at the end, so running it repeatedly is safe.
 
 ---
