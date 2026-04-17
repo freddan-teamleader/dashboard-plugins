@@ -1,12 +1,12 @@
 {
   "pluginId": "0a129dc2-8f1c-45f8-849c-7702bc038b90",
   "name": "WeConnect Vehicle Tracker",
-  "version": "5.0.1",
+  "version": "5.0.2",
   "types": [
     "weconnect-vehicle-tracker"
   ],
   "serviceTypes": [
     "weconnect-agent"
   ],
-  "updatedAt": "2026-04-17T14:32:44.154Z"
+  "updatedAt": "2026-04-17T14:34:29.048Z"
 }
