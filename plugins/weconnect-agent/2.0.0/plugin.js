@@ -1,162 +1,323 @@
 // @bump: major
-const svc = await api.getService('weconnect-agent');
+api.registerService({
+  type: 'weconnect-agent',
+  defaultConfig: {
+    email: '',
+    password: '',
+    vin: '',
+    pollIntervalMinutes: 30
+  },
+  hiddenConfig: {
+    _cachedTokens: null
+  },
+  events: {
+    'reading:new':   { description: 'New odometer/level reading stored', schema: { vin: 'string', odometer: 'number', level: 'number', levelType: 'string', timestamp: 'string' } },
+    'status:change': { description: 'Agent status update',              schema: { status: 'string', message: 'string' } }
+  },
+  create() {
+    // ---- Constants (match WeConnect-python main) ----
+    const SESSION    = 'weconnect-agent:auth'
+    const CLIENT_ID  = 'a24fba63-34b3-4d43-b181-942111e6bda8@apps_vw-dilab_com'
+    const REDIRECT   = 'weconnect://authenticated'
+    const SCOPE      = 'openid profile badge cars dealers vin'
+    const BFF        = 'https://emea.bff.cariad.digital'
+    const IDENTITY   = 'https://identity.vwgroup.io'
+    const AUTHZ_URL  = `${BFF}/user-login/v1/authorize`
+    const TOKEN_URL  = `${BFF}/user-login/login/v1`
+    const REFRESH_URL= `${BFF}/login/v1/idk/token`
+    const UA         = 'Volkswagen/3.51.1-android/14'
 
-api.registerWidget({
-  type: 'weconnect-vehicle-tracker',
-  title: 'WeConnect Vehicle Tracker',
-  description: 'Live odometer, battery/fuel level and history from Volkswagen WeConnect',
-  height: 320,
-  defaultConfig: { vin: '' },
-  dependencies: ['weconnect-agent'],
+    const cfg = () => api.config || {}
+    let tokens      = null   // { access_token, refresh_token, id_token, expires_at }
+    let pollTimer   = null
+    let lastReading = null
+    let lastStatus  = { status: 'idle', message: 'Not started' }
 
-  render: async function(container, config) {
-    container.innerHTML = `
-      <style>
-        .wc-wrap { font-family: system-ui, sans-serif; padding: 14px; height: 100%; box-sizing: border-box; display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
-        .wc-status { font-size: 11px; color: var(--text-muted); display: flex; align-items: center; gap: 6px; }
-        .wc-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent-green); flex-shrink: 0; }
-        .wc-dot.error   { background: var(--accent-red); }
-        .wc-dot.polling { background: var(--accent-orange); animation: wc-pulse 1s infinite; }
-        @keyframes wc-pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
-        .wc-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-        .wc-card { background: var(--bg-tertiary); border-radius: 10px; padding: 10px 14px; border: 1px solid var(--border); }
-        .wc-card-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 2px; }
-        .wc-card-value { font-size: 22px; font-weight: 700; color: var(--text-primary); line-height: 1; }
-        .wc-card-unit  { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
-        .wc-chart-wrap { flex: 1; min-height: 0; background: var(--bg-tertiary); border-radius: 10px; border: 1px solid var(--border); padding: 8px; }
-        .wc-chart-title { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }
-        .wc-error { color: var(--accent-red); font-size: 11px; padding: 6px 10px; background: var(--bg-tertiary); border-radius: 8px; border: 1px solid var(--accent-red); word-break: break-word; max-height: 56px; overflow: auto; }
-        .wc-btn { font-size: 11px; color: var(--accent-blue); background: none; border: 1px solid var(--accent-blue); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
-        .wc-btn:hover { background: var(--bg-hover); }
-        .wc-row { display: flex; align-items: center; justify-content: space-between; }
-      </style>
-      <div class="wc-wrap">
-        <div class="wc-row">
-          <div class="wc-status"><div class="wc-dot" id="wc-dot"></div><span id="wc-status-text">Starting…</span></div>
-          <button class="wc-btn" id="wc-poll-btn">↻ Poll now</button>
-        </div>
-        <div id="wc-error-box" style="display:none" class="wc-error"></div>
-        <div class="wc-cards">
-          <div class="wc-card">
-            <div class="wc-card-label">Odometer</div>
-            <div class="wc-card-value" id="wc-odo">—</div>
-            <div class="wc-card-unit">km</div>
-          </div>
-          <div class="wc-card">
-            <div class="wc-card-label" id="wc-level-label">Battery</div>
-            <div class="wc-card-value" id="wc-level">—</div>
-            <div class="wc-card-unit">%</div>
-          </div>
-        </div>
-        <div class="wc-chart-wrap">
-          <div class="wc-chart-title">Last 30 readings — <span id="wc-chart-label">level %</span> & odometer</div>
-          <canvas id="wc-canvas" style="width:100%;height:calc(100% - 20px);display:block"></canvas>
-        </div>
-      </div>`;
-
-    const dot        = container.querySelector('#wc-dot');
-    const statusText = container.querySelector('#wc-status-text');
-    const errorBox   = container.querySelector('#wc-error-box');
-    const odoEl      = container.querySelector('#wc-odo');
-    const levelEl    = container.querySelector('#wc-level');
-    const levelLabel = container.querySelector('#wc-level-label');
-    const chartLabel = container.querySelector('#wc-chart-label');
-    const canvas     = container.querySelector('#wc-canvas');
-    const pollBtn    = container.querySelector('#wc-poll-btn');
-
-    let chartInstance = null;
-    let chartHistory  = [];
-
+    // ---- Helpers ----
+    function emit(event, data) {
+      api.emit(`weconnect-agent:${event}`, data)
+      if (event === 'status:change') lastStatus = data
+    }
     function setStatus(status, message) {
-      dot.className      = 'wc-dot' + (status === 'error' ? ' error' : status === 'polling' ? ' polling' : '');
-      statusText.textContent = message;
-      if (status === 'error') { errorBox.style.display = 'block'; errorBox.textContent = '⚠ ' + message; }
-      else errorBox.style.display = 'none';
+      console.log(`[weconnect-agent] ${status}: ${message}`)
+      emit('status:change', { status, message })
+    }
+    function traceId() {
+      const h = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2,'0')).join('')
+      return (`${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`).toUpperCase()
+    }
+    function pickHidden(html, name) {
+      const patterns = [
+        new RegExp(`name="${name}"\\s+value="([^"]+)"`),
+        new RegExp(`value="([^"]+)"\\s+name="${name}"`),
+        new RegExp(`name='${name}'\\s+value='([^']+)'`),
+      ]
+      for (const re of patterns) { const m = html.match(re); if (m) return m[1] }
+      return null
+    }
+    function parseUrlQueryAndFragment(url) {
+      // Handle weconnect://authenticated#state=...&id_token=...&...
+      const hashIdx = url.indexOf('#')
+      const qIdx    = url.indexOf('?')
+      const out = {}
+      const addPairs = (s) => new URLSearchParams(s).forEach((v,k) => out[k] = v)
+      if (qIdx    !== -1) addPairs(url.slice(qIdx+1, hashIdx === -1 ? undefined : hashIdx))
+      if (hashIdx !== -1) addPairs(url.slice(hashIdx+1))
+      return out
     }
 
-    function updateCards(r) {
-      if (!r) return;
-      odoEl.textContent   = r.odometer != null ? Number(r.odometer).toLocaleString() : '—';
-      levelEl.textContent = r.level    != null ? r.level : '—';
-      const isSOC = (r.levelType || r.level_type) !== 'fuel';
-      levelLabel.textContent = isSOC ? 'Battery' : 'Fuel';
-      chartLabel.textContent = isSOC ? 'battery %' : 'fuel %';
-      levelEl.style.color = r.level == null ? 'var(--text-primary)'
-        : r.level < 20 ? 'var(--accent-red)'
-        : r.level < 50 ? 'var(--accent-orange)'
-        : 'var(--accent-green)';
-    }
+    // ---- Auth (mirrors WeConnect-python login flow) ----
+    async function login() {
+      const { email, password } = cfg()
+      if (!email || !password) throw new Error('Email and password not configured')
 
-    async function drawChart(rows) {
-      if (!rows.length) return;
-      const { Chart, registerables } = await import('https://esm.sh/chart.js');
-      Chart.register(...registerables);
-      if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
+      setStatus('polling', 'Authenticating…')
 
-      const labels  = rows.map(r => { const d = new Date(r.recorded_at || r.timestamp); return `${d.getMonth()+1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}`; });
-      const levels  = rows.map(r => r.level  ?? null);
-      const odoms   = rows.map(r => r.odometer ?? null);
+      // Clear any stale cookies in the proxy session
+      try { await api.fetch(`${BFF}/`, { session: SESSION, method: 'GET' }) } catch {}
 
-      chartInstance = new Chart(canvas, {
-        type: 'line',
-        data: { labels, datasets: [
-          { label: 'Level %',  data: levels, borderColor: '#4ade80', backgroundColor: 'rgba(74,222,128,0.1)', tension: 0.4, pointRadius: 2, yAxisID: 'yL' },
-          { label: 'Odo (km)', data: odoms,  borderColor: '#60a5fa', backgroundColor: 'rgba(96,165,250,0.05)', tension: 0.4, pointRadius: 2, yAxisID: 'yO' }
-        ]},
-        options: {
-          responsive: true, maintainAspectRatio: false, animation: false,
-          plugins: { legend: { display: false } },
-          scales: {
-            x:  { display: false },
-            yL: { position: 'left',  min: 0, max: 100, ticks: { color: '#4ade80', font: { size: 9 }, maxTicksLimit: 4 }, grid: { color: 'rgba(255,255,255,0.05)' } },
-            yO: { position: 'right', ticks: { color: '#60a5fa', font: { size: 9 }, maxTicksLimit: 4 }, grid: { display: false } }
-          }
-        }
-      });
-    }
+      // --- Step 1: GET BFF authorize → 302 to identity.vwgroup.io with state in query ---
+      const authUrl = `${AUTHZ_URL}?` + new URLSearchParams({
+        redirect_uri: REDIRECT,
+        nonce: crypto.randomUUID()
+      })
+      const r1 = await api.fetch(authUrl, { session: SESSION, headers: { 'User-Agent': UA } })
+      console.log('[weconnect-agent] Step 1 authorize → final URL:', r1.url, 'status:', r1.status)
 
-    // ── No service guard ─────────────────────────────────────────────────────
-    if (!svc) { setStatus('error', 'WeConnect Agent not installed'); return; }
+      const html1 = await r1.text()
 
-    // ── Load history from DB immediately — never block on agent ─────────────
-    try {
-      const rows = await api.db.query({}, { orderBy: 'recorded_at', ascending: false, limit: 30 });
-      if (rows?.length) {
-        chartHistory = [...rows].reverse();
-        const latest = chartHistory[chartHistory.length - 1];
-        updateCards({ ...latest, levelType: latest.level_type });
-        await drawChart(chartHistory);
-        setStatus('idle', `Last reading: ${new Date(latest.recorded_at).toLocaleTimeString()}`);
-      } else {
-        // Show live agent reading if DB is empty
-        const live = svc.getLastReading?.();
-        if (live) { updateCards(live); setStatus('idle', 'Live (no DB history yet)'); }
-        else       setStatus('polling', 'Waiting for first poll…');
+      // If we landed on the identity signin page, the form will be present.
+      // If we got the "new auth flow" page we must handle state extraction differently.
+      let csrf       = pickHidden(html1, '_csrf')
+      let relayState = pickHidden(html1, 'relayState')
+      let hmac1      = pickHidden(html1, 'hmac')
+
+      // Extract state from the final URL (identity redirects include it)
+      const finalUrlObj = (() => { try { return new URL(r1.url) } catch { return null } })()
+      let state = finalUrlObj?.searchParams.get('state') || pickHidden(html1, 'state')
+
+      console.log('[weconnect-agent] Form fields:', { csrf: !!csrf, relayState: !!relayState, hmac: !!hmac1, state: !!state })
+
+      if (!csrf || !relayState || !hmac1) {
+        // Dump a snippet so we can debug
+        console.warn('[weconnect-agent] Login page snippet:', html1.slice(0, 500))
+        throw new Error('Could not parse login form fields (legacy form missing)')
       }
-    } catch (e) {
-      console.warn('[weconnect-widget] DB load error:', e.message);
-      const live = svc.getLastReading?.();
-      if (live) updateCards(live);
-      setStatus('idle', 'DB unavailable — using live data');
+
+      // --- Step 2: POST email → password form (new hmac) ---
+      const r2 = await api.fetch(
+        `${IDENTITY}/signin-service/v1/${CLIENT_ID}/login/identifier`,
+        { method: 'POST', session: SESSION,
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': UA },
+          body: new URLSearchParams({ _csrf: csrf, relayState, email, hmac: hmac1 }).toString()
+        }
+      )
+      const html2 = await r2.text()
+      console.log('[weconnect-agent] Step 2 email → status:', r2.status)
+
+      const hmac2 = pickHidden(html2, 'hmac')
+      if (!hmac2) {
+        console.warn('[weconnect-agent] Password page snippet:', html2.slice(0, 500))
+        throw new Error('Could not parse password form — wrong email?')
+      }
+
+      // --- Step 3: POST password → proxy follows redirects, ends at weconnect://authenticated#… ---
+      const r3 = await api.fetch(
+        `${IDENTITY}/signin-service/v1/${CLIENT_ID}/login/authenticate`,
+        { method: 'POST', session: SESSION,
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': UA },
+          body: new URLSearchParams({ _csrf: csrf, relayState, email, password, hmac: hmac2 }).toString()
+        }
+      )
+      console.log('[weconnect-agent] Step 3 password → final URL:', r3.url, 'status:', r3.status)
+
+      const finalUrl = r3.url || ''
+      if (!finalUrl.startsWith('weconnect://authenticated')) {
+        throw new Error(`Expected weconnect:// callback, got: ${finalUrl.slice(0, 200)}`)
+      }
+
+      const frag = parseUrlQueryAndFragment(finalUrl)
+      if (!frag.state || !frag.id_token || !frag.access_token || !frag.code) {
+        throw new Error(`Callback missing tokens. Got keys: ${Object.keys(frag).join(',')}`)
+      }
+
+      // --- Step 4: Exchange for final tokens via BFF login endpoint ---
+      const r4 = await api.fetch(TOKEN_URL, {
+        method: 'POST', session: SESSION,
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'User-Agent': UA },
+        body: JSON.stringify({
+          state:              frag.state,
+          id_token:           frag.id_token,
+          redirect_uri:       REDIRECT,
+          region:             'emea',
+          access_token:       frag.access_token,
+          authorizationCode:  frag.code
+        })
+      })
+      const tok = await r4.json()
+      console.log('[weconnect-agent] Token exchange keys:', Object.keys(tok))
+
+      // Python normalises camelCase → snake_case
+      const access  = tok.accessToken  || tok.access_token
+      const refresh = tok.refreshToken || tok.refresh_token
+      const idTok   = tok.idToken      || tok.id_token
+      if (!access) throw new Error(`Token exchange failed: ${JSON.stringify(tok).slice(0, 300)}`)
+
+      tokens = {
+        access_token:  access,
+        refresh_token: refresh,
+        id_token:      idTok,
+        expires_at:    Date.now() + (tok.expires_in || tok.expiresIn || 3600) * 1000
+      }
+      api.updateConfig({ _cachedTokens: tokens })
+      console.log('[weconnect-agent] Authenticated ✓')
     }
 
-    // Reflect current agent status
-    const agentStatus = svc.getStatus?.();
-    if (agentStatus?.status === 'error')   setStatus('error',   agentStatus.message);
-    else if (agentStatus?.status === 'polling') setStatus('polling', agentStatus.message);
+    async function refreshTokens() {
+      if (!tokens?.refresh_token) { tokens = null; return }
+      try {
+        const r = await api.fetch(REFRESH_URL, {
+          method: 'POST', session: SESSION,
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': UA },
+          body: new URLSearchParams({
+            grant_type:    'refresh_token',
+            refresh_token: tokens.refresh_token,
+            client_id:     CLIENT_ID
+          }).toString()
+        })
+        if (r.status === 401) { tokens = null; return }
+        const tok = await r.json()
+        const access  = tok.accessToken  || tok.access_token
+        const refresh = tok.refreshToken || tok.refresh_token || tokens.refresh_token
+        const idTok   = tok.idToken      || tok.id_token      || tokens.id_token
+        if (!access) throw new Error('Refresh failed')
+        tokens = {
+          access_token:  access,
+          refresh_token: refresh,
+          id_token:      idTok,
+          expires_at:    Date.now() + (tok.expires_in || tok.expiresIn || 3600) * 1000
+        }
+        api.updateConfig({ _cachedTokens: tokens })
+        console.log('[weconnect-agent] Token refreshed ✓')
+      } catch (e) {
+        console.warn('[weconnect-agent] Refresh failed, will re-login:', e.message)
+        tokens = null
+      }
+    }
 
-    // ── Subscribe to live events ─────────────────────────────────────────────
-    const unsubR = api.on('weconnect-agent:reading:new', async (r) => {
-      updateCards(r);
-      chartHistory.push({ ...r, level_type: r.levelType, recorded_at: r.timestamp });
-      if (chartHistory.length > 30) chartHistory.shift();
-      await drawChart(chartHistory);
-      setStatus('idle', `Updated ${new Date().toLocaleTimeString()}`);
-    });
-    const unsubS = api.on('weconnect-agent:status:change', ({ status, message }) => setStatus(status, message));
+    async function bffGet(path) {
+      if (!tokens || Date.now() > tokens.expires_at - 60_000) await refreshTokens()
+      if (!tokens) await login()
+      const res = await api.fetch(`${BFF}${path}`, {
+        headers: {
+          Authorization:         `Bearer ${tokens.access_token}`,
+          Accept:                '*/*',
+          'Content-Type':        'application/json',
+          'Content-Version':     '1',
+          'User-Agent':          UA,
+          'Accept-Language':     'de-de',
+          'x-newrelic-id':       'VgAEWV9QDRAEXFlRAAYPUA==',
+          'weconnect-trace-id':  traceId(),
+          'x-android-package-name': 'com.volkswagen.weconnect'
+        }
+      })
+      if (res.status === 401) { tokens = null; await login(); return bffGet(path) }
+      if (!res.ok) throw new Error(`BFF ${path} returned ${res.status}`)
+      return res.json()
+    }
 
-    pollBtn.addEventListener('click', () => { setStatus('polling', 'Fetching…'); svc.pollNow?.(); });
+    // ---- Poll ----
+    async function poll() {
+      const { vin, email, password } = cfg()
+      if (!email || !password) { setStatus('error', 'Email and password not configured'); return schedule() }
 
-    container.__cleanup__ = () => { unsubR(); unsubS(); if (chartInstance) chartInstance.destroy(); };
+      try {
+        setStatus('polling', 'Fetching vehicle data…')
+        if (!tokens) await login()
+
+        // Get vehicle list if VIN not pinned
+        let activeVin = vin
+        if (!activeVin) {
+          const vdata = await bffGet('/vehicle/v1/vehicles')
+          console.log('[weconnect-agent] Vehicles:', JSON.stringify(vdata).slice(0, 300))
+          activeVin = vdata?.data?.[0]?.vin
+          if (!activeVin) throw new Error('No VIN found — set one in Settings')
+          api.updateConfig({ vin: activeVin })
+        }
+
+        // Fetch selective status (odometer + fuel/SoC + range)
+        const jobs = ['fuelStatus','measurements','charging']
+        const status = await bffGet(`/vehicle/v1/vehicles/${activeVin}/selectivestatus?jobs=${jobs.join(',')}`)
+        console.log('[weconnect-agent] selectivestatus keys:', Object.keys(status || {}))
+
+        // Parse odometer
+        const odometer = status?.measurements?.odometerStatus?.value?.odometer
+                      ?? status?.measurements?.odometerStatus?.value?.odometer_km
+                      ?? null
+
+        // Parse level — prefer SoC for EVs, else fuel level
+        let level = null, levelType = 'fuel'
+        const fl = status?.measurements?.fuelLevelStatus?.value
+        if (fl) {
+          if (fl.currentSOC_pct != null) { level = fl.currentSOC_pct; levelType = 'soc' }
+          else if (fl.currentFuelLevel_pct != null) { level = fl.currentFuelLevel_pct; levelType = 'fuel' }
+        }
+        // Fallback to charging domain
+        if (level == null) {
+          const soc = status?.charging?.batteryStatus?.value?.currentSOC_pct
+          if (soc != null) { level = soc; levelType = 'soc' }
+        }
+
+        const reading = {
+          vin:       activeVin,
+          odometer:  odometer == null ? null : Number(odometer),
+          level:     level    == null ? null : Number(level),
+          levelType,
+          timestamp: new Date().toISOString()
+        }
+        lastReading = reading
+
+        try {
+          await api.db.insert({
+            vin:         activeVin,
+            odometer:    reading.odometer,
+            level:       reading.level,
+            level_type:  reading.levelType,
+            recorded_at: reading.timestamp
+          })
+        } catch (e) { console.warn('[weconnect-agent] DB insert failed:', e.message) }
+
+        emit('reading:new', reading)
+        setStatus('idle', `Updated ${new Date().toLocaleTimeString()} — ${reading.odometer ?? '?'} km, ${reading.level ?? '?'}% ${reading.levelType}`)
+
+      } catch (e) {
+        console.error('[weconnect-agent] Poll error:', e)
+        setStatus('error', e.message)
+        tokens = null // force re-auth next tick
+      }
+      schedule()
+    }
+
+    function schedule() {
+      const mins = Math.max(5, cfg().pollIntervalMinutes || 30)
+      clearTimeout(pollTimer)
+      pollTimer = setTimeout(poll, mins * 60 * 1000)
+    }
+
+    // Restore cached tokens if still valid
+    const cached = cfg()._cachedTokens
+    if (cached?.access_token && cached?.expires_at > Date.now()) {
+      tokens = cached
+      console.log('[weconnect-agent] Restored cached tokens ✓')
+    }
+
+    // Kick off
+    setTimeout(poll, 2000)
+
+    return {
+      getLastReading: () => lastReading,
+      getStatus:      () => lastStatus,
+      pollNow:        () => { clearTimeout(pollTimer); setTimeout(poll, 0) }
+    }
   }
-});
+})
