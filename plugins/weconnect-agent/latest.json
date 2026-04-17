@@ -1,0 +1,10 @@
+{
+  "pluginId": "fe3081d6-58ba-476f-b51b-9bd9e8fd75a8",
+  "name": "Weconnect Agent",
+  "version": "1.0.0",
+  "types": [],
+  "serviceTypes": [
+    "weconnect-agent"
+  ],
+  "updatedAt": "2026-04-17T11:21:33.007Z"
+}
