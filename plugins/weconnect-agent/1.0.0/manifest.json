@@ -1,5 +1,5 @@
 {
-  "pluginId": "8915a78b-6fb2-400e-a024-85ba36a9d820",
+  "pluginId": "521e587b-9275-44e7-9f19-4c0ae9133689",
   "name": "Weconnect Agent",
   "description": "",
   "version": "1.0.0",
@@ -7,5 +7,5 @@
   "serviceTypes": [
     "weconnect-agent"
   ],
-  "savedAt": "2026-04-17T18:58:53.365Z"
+  "savedAt": "2026-04-17T19:40:32.899Z"
 }
