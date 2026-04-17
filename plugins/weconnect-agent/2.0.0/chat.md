@@ -6,178 +6,82 @@
 
 ## You
 
-Create a WeConnect vehicle tracker widget. It should poll the WeConnect API for odometer and battery/fuel level data and store readings in api.db so I can see historical trends.
-The widget should have two parts:
-Step 1 – Agent (install first): A background service that polls WeConnect every 30 minutes. It should authenticate with WeConnect using email/password stored in config, fetch odometer (km) and battery/state of charge (%), emit a weconnect-agent:reading:new event with the data, and store each reading in api.db with a timestamp.
-Step 2 – Dashboard widget: Shows current odometer, current battery %, a sparkline chart of the last 30 readings, and the time since last update. Listens to the agent events for live updates and falls back to api.db on load.
-Config fields needed: weconnect email, password, VIN (optional if only one car). Use api.fetch() for all HTTP requests.
+With the help of the python lib we might be able to create this agent and tested with the credentials email fredrik@teamleader.se and password: nAtsak-pynvav-sekxo5. The python lib is at https://github.com/tillsteinbach/WeConnect-python
 
 ---
 
 ## Claude
 
-Good. I have a solid picture of the WeConnect auth architecture — it uses VW's OpenID Connect flow with email/password. Now I'll build both plugins. The WeConnect API uses a multi-step OAuth flow: get a login page → POST credentials → follow redirects → exchange code for tokens → then call the vehicle REST API. Let me build this carefully.
+I'll investigate the Python library to understand the actual WeConnect API flow, since the current implementation is failing. Let me look at how the Python lib handles authentication.The key file is `we_connect_session.py`. Let me fetch it raw and also `vw_web_session.py` (which likely has the actual login flow).The proxy is trying to parse as JSON. Let me use the GitHub API's base64 content endpoint instead:Excellent! I now have the decoded content from base64. Critical findings from the Python lib:
 
-Here are both plugins. Install them **in order**.
+1. **Scope is different**: `'openid profile badge cars dealers vin'` (not `'openid profile address phone email mbb offline_access'`)
+2. **Auth flow is different**: It GETs `https://emea.bff.cariad.digital/user-login/v1/authorize` first which **redirects** to VW identity — the state/nonce come back from that redirect
+3. **Token endpoint is different**: After auth code, POST JSON to `https://emea.bff.cariad.digital/user-login/login/v1` (not the OIDC token endpoint)
+4. **Refresh URL is different**: `https://emea.bff.cariad.digital/login/v1/idk/token`
+5. **API base is different**: Uses `https://emea.bff.cariad.digital` APIs, NOT `msg.volkswagen.de/fs-car`
 
----
+Let me get vw_web_session.py for the actual web form auth flow, plus check the main API endpoints:I now have a clear picture. Let me look for the `openid_session.py` authorizationUrl method briefly to understand the initial state/nonce capture — but I have enough to rewrite. Let me also check if there's a known vehicle selfURL pattern:
 
-## Step 1 — Install first: WeConnect Agent (background service)
+Key findings from decoded Python source:
 
-This service handles authentication, polling every 30 minutes, storing readings in `api.db`, and emitting live events.
+**Auth flow:**
+1. Client_id: `a24fba63-34b3-4d43-b181-942111e6bda8@apps_vw-dilab_com`
+2. Redirect URI: `weconnect://authenticated`
+3. Scope: `openid profile badge cars dealers vin`
+4. **Authorization URL**: GET `https://emea.bff.cariad.digital/user-login/v1/authorize?redirect_uri=...&nonce=...` — the BFF redirects to `identity.vwgroup.io` with `state` included. The initial GET returns 302 with `Location` pointing to identity.vwgroup.io — `state` is parsed from that query.
+5. Then follow the redirect to the login page (contains form with `_csrf`, `relayState`, `hmac`, `email`).
+6. POST email → get password form (new hmac).
+7. POST password → 302 to `weconnect://authenticated#state=...&id_token=...&access_token=...&code=...`
+8. **Exchange**: POST to `https://emea.bff.cariad.digital/user-login/login/v1` with JSON body `{state, id_token, redirect_uri, region:"emea", access_token, authorizationCode}` → returns JSON with `accessToken`, `idToken`, `refreshToken` (camelCase, need to rename)
+9. **Refresh**: POST to `https://emea.bff.cariad.digital/login/v1/idk/token` with form-encoded `{grant_type:"refresh_token", refresh_token, client_id}`
+
+**API endpoints:**
+- Vehicle list: `GET https://emea.bff.cariad.digital/vehicle/v1/vehicles`
+- Requires headers including `weconnect-trace-id` (UUID)
+
+**Key note:** The tokens returned after authorize include fragment parameters `#state=...&id_token=...&access_token=...&code=...` in the callback URL. The Bearer token eventually used with the API is the `accessToken` returned by the `/user-login/login/v1` exchange.
+
+Now let me rewrite the agent. The tricky part: **web-based login forms are near-impossible to do reliably from a browser plugin** due to CORS, the proxy following/not following redirects, and — most importantly — the VW identity server uses hCaptcha/device fingerprinting in many cases. The proxy's `session:` feature helps a lot but we need to manually follow 302s on non-browser-recognized schemes (`weconnect://`).
+
+Let me also get the vehicle endpoint structure and the selectivestatus endpoint (for fuel/odometer) — this is in the `vehicle.py` element:I have enough information. The per-vehicle data URL pattern in the Python lib is `https://emea.bff.cariad.digital/vehicle/v1/vehicles/{vin}/selectivestatus?jobs=<domains>`. Common domains: `fuelStatus`, `measurements`, `charging`. The response has shape like `{fuelStatus: {rangeStatus: {value: {totalRange_km: ...}}}, measurements: {odometerStatus: {value: {odometer: 12345}}, fuelLevelStatus: {value: {currentFuelLevel_pct: 80, currentSOC_pct: 50, primaryEngineType: 'gasoline'}}}}`.
+
+Now I have everything I need. Let me rewrite the agent with the corrected endpoints and flow. Key improvements:
+
+1. Correct client_id/scope/redirect
+2. New auth URL via BFF: `https://emea.bff.cariad.digital/user-login/v1/authorize` (gets state via 302 redirect to identity.vwgroup.io)
+3. Login page URL needs "legacy" form support (same old `_csrf/relayState/hmac` pattern we already do)
+4. Token exchange: POST JSON to `https://emea.bff.cariad.digital/user-login/login/v1` with fragment params
+5. Refresh: POST form to `https://emea.bff.cariad.digital/login/v1/idk/token`
+6. Vehicle list: GET `https://emea.bff.cariad.digital/vehicle/v1/vehicles`
+7. Vehicle data: GET `https://emea.bff.cariad.digital/vehicle/v1/vehicles/{vin}/selectivestatus?jobs=fuelStatus,measurements,charging`
+8. Add `weconnect-trace-id` header (UUID format uppercase) on every API request
+
+Here's the updated plugin:
 
 [Plugin code — see plugin.js]
 
----
+### What changed (major version bump)
 
-## Step 2 — Dashboard widget: WeConnect Vehicle Tracker
+I studied the **actual** `tillsteinbach/WeConnect-python` source (decoded from the GitHub API) and discovered the old plugin was using the wrong endpoints entirely — the `msg.volkswagen.de/fs-car` API hasn't been the WeConnect backend for years. Here's what's new:
 
-[Plugin code — see plugin.js]
-
----
-
-## How it works
-
-### Authentication flow
-The agent implements VW Group's OpenID Connect flow manually:
-1. `GET` the authorize page → extract CSRF/relay tokens from the login form HTML
-2. `POST` email + password to the login action URL
-3. Follow redirects until the `weconnect://authenticated?code=…` redirect URI
-4. Exchange the code for `access_token` + `refresh_token`
-5. Auto-refresh the access token when it's about to expire; re-authenticate if refresh fails
-
-### Data flow
-[Plugin code — see plugin.js]
-
-### Config fields (set via widget Settings panel)
-
-| Field | Required | Description |
+| Thing | Old (broken) | New (matches Python lib) |
 |---|---|---|
-| `email` | ✅ | Your WeConnect/MyVolkswagen email |
-| `password` | ✅ | Your password (stored locally, never sent anywhere except VW's servers) |
-| `vin` | Optional | Leave blank to auto-detect the first vehicle |
-| `pollIntervalMinutes` | Optional | Default `30`, minimum `5` |
+| Scope | `openid profile address phone email mbb offline_access` | `openid profile badge cars dealers vin` |
+| Authorize URL | `identity.vwgroup.io/oidc/v1/authorize` | `emea.bff.cariad.digital/user-login/v1/authorize` (redirects to identity with state) |
+| Token exchange | OIDC code-PKCE exchange | POST JSON `{state, id_token, access_token, authorizationCode, region, redirect_uri}` to `emea.bff.cariad.digital/user-login/login/v1` |
+| Refresh endpoint | `identity.vwgroup.io/oidc/v1/token` | `emea.bff.cariad.digital/login/v1/idk/token` |
+| Vehicle list | `msg.volkswagen.de/fs-car/.../v1/vehicles` | `emea.bff.cariad.digital/vehicle/v1/vehicles` |
+| Vehicle data | VW_PRD StoredVehicleDataResponse XML-ish field IDs | `/vehicle/v1/vehicles/{vin}/selectivestatus?jobs=fuelStatus,measurements,charging` (clean JSON: `odometerStatus.value.odometer`, `fuelLevelStatus.value.currentSOC_pct` / `currentFuelLevel_pct`) |
+| Required header | none | `weconnect-trace-id` UUID on every API call |
 
-### Important notes
-- **VW's login flow is rate-limited** — avoid setting `pollIntervalMinutes` below 15
-- The widget handles both **EVs** (battery SoC %) and **ICE/PHEV** (fuel level %)
-- The **↻ Poll now** button triggers an immediate fetch
-- Historical sparklines accumulate over time — the more readings stored in `api.db`, the better the trends look
-- If VW changes their auth flow (it happens), check [WeConnect-python](https://github.com/tillsteinbach/WeConnect-python) for updated endpoints
+### One important caveat
 
----
+Browser-based login to VW Identity is fragile — the same flow the Python lib uses is what we're doing, but some accounts (especially fresh ones) trigger hCaptcha or require a one-time "accept new terms" click in the mobile app. If auth keeps failing after this update, watch the console for which step fails:
 
-## You
+- **Step 1 fails to find `_csrf/relayState/hmac`** → VW presented the "new auth flow" page (no legacy form). We'd need to implement the `/u/login?state=…` JSON POST path from `_handle_new_auth_flow`.
+- **Step 3 doesn't reach `weconnect://`** → terms-and-conditions redirect; need to log into the WeConnect mobile app once and accept.
+- **Token exchange fails** → the fragment params weren't captured (usually means the proxy's session lost cookies between steps).
 
-installHook.js:1 Failed to create service "weconnect-agent": TypeError: Cannot read properties of undefined (reading 'pollIntervalMinutes')
-    at create (eval at executePlugin (pluginLoader.js:164:13), <anonymous>:231:41)
-    at Object.registerService (pluginLoader.js:284:28)
-    at eval (eval at executePlugin (pluginLoader.js:164:13), <anonymous>:3:5)
-    at executePlugin (pluginLoader.js:164:33)
-    at usePlugins.js:317:15
-    at async init (App.jsx:171:7)
-
----
-
-## Claude
-
-The `create(config)` function isn't receiving config correctly — the service `create()` is called without arguments by the plugin loader. Config needs to be read via `api.storage` or from `defaultConfig` directly. Let me fix that.The fix is straightforward — `create()` receives no arguments, so `config` is `undefined`. The service must read its config from `defaultConfig` keys via the `api` object. Looking at the plugin loader, services should access config the same way widgets do — through `api.config` or by referencing `defaultConfig` directly.Here's the corrected agent — the key fix is that `create()` takes no parameters and config is accessed via a lazily-read closure over `api`:
-
-[Plugin code — see plugin.js]
-
-### What changed and why
-
-| Problem | Fix |
-|---|---|
-| `create(config)` — `config` was `undefined` because the loader calls `create()` with no args | Removed the parameter; replaced all `config.x` with `cfg().x` where `cfg = () => api.config \|\| {}` |
-| `config.pollIntervalMinutes` crashed immediately at service startup | `cfg()` is called lazily inside `poll()` and the interval setup, so it's always safe |
-| Immediate `poll()` could race with loader initialization | Changed to `setTimeout(poll, 1000)` to let the loader finish first |
-
-The `cfg()` helper reads `api.config` fresh on every call, which also means if the user updates Settings (email/password/VIN), the next poll automatically picks up the new values without restarting the service.
-
----
-
-## You
-
-It's back on "Loading..."
-
----
-
-## Claude
-
-Let me fetch the WeConnect API to understand the actual response structure and debug the auth flow.The auth endpoint is completely blocked by the proxy. The widget is stuck on "Loading..." because `poll()` throws immediately and the widget never gets a `reading:new` event or a DB fallback. Let me fix the widget to handle this gracefully — and also add proper debug logging to the agent so you can see exactly what's failing in the console.
-
-The real issue is likely one of:
-1. The auth flow fails silently → `lastReading` is never set → widget spins forever
-2. The widget's DB fallback isn't working
-
-Let me patch both plugins with proper error surfacing:The API endpoints themselves are reachable through the proxy (502 is expected without auth — it means the proxy got through). The auth endpoint returning "Failed to fetch" is a proxy-level DNS/TLS issue. Let me patch the agent to surface errors clearly in the widget and add a status display so you can see what's happening:Good — `identity.vwgroup.io` is reachable through the proxy (returns HTML, not a fetch error). The issue was specifically the `authorize` endpoint with `weconnect://` redirect URI — the proxy likely chokes on that non-HTTP URI scheme. Let me fix the agent to use a proper direct signin URL path (bypassing the authorize redirect dance) and make the widget show real status instead of spinning:
-
-[Plugin code — see plugin.js]
-
----
-
-And here's the updated widget that **never gets stuck on "Loading…"** — it shows status, errors, and sample data immediately:
-
-[Plugin code — see plugin.js]
-
----
-
-### What changed
-
-| Issue | Fix |
-|---|---|
-| Widget stuck on "Loading…" | Now shows DB data immediately on load, or "No readings yet" — never spins |
-| Silent auth errors | Every step logs to console with `[weconnect-agent]` prefix — open DevTools to see exactly where it fails |
-| Error box hidden | Red error banner appears in the widget itself when the agent reports `status: 'error'` |
-| Agent status not surfaced | Widget reads `svc.getStatus()` on mount and subscribes to `status:change` events |
-
-**Open DevTools → Console** and filter by `weconnect-agent` — you'll see exactly which step of the auth flow fails so we can fix it precisely.
-
----
-
-## You
-
-Service not running — may need a page reload or re-activation. Did reload with no change
-
----
-
-## Claude
-
-Let me look at the actual current plugin code and fetch the WeConnect auth endpoints to diagnose exactly what's happening.Good — that tells me everything I need. The `signin-service` endpoint **returns HTML** (status null, JSON parse fails), meaning the proxy delivers it but the old agent code was misreading responses. The `weconnect://` redirect URI is what kills the authorize flow — the proxy can't follow a non-HTTP URI scheme. And `emea.bff.cariad.digital` is fully blocked.
-
-The only reliable path from a browser proxy is:
-1. GET the signin page HTML → parse `_csrf`, `hmac`, `relayState` from the form
-2. POST credentials → get a redirect with `userId` in the URL
-3. POST to the next step → eventually get a `code` in a redirect header
-4. Exchange code at `token_endpoint` (which **does** work, it's standard HTTPS)
-
-The real problem is the **proxy doesn't follow redirects automatically** and the agent code never properly parsed the HTML form fields. Let me rewrite it correctly end-to-end:The signin page returns HTML — the proxy delivers it fine (HTML parse error is expected). Now I have everything I need. Here are both plugins, completely rewritten with a correct step-by-step auth flow:
-
----
-
-## Step 1 — Install first: WeConnect Agent
-
-[Plugin code — see plugin.js]
-
----
-
-## Step 2 — Dashboard widget: WeConnect Vehicle Tracker
-
-[Plugin code — see plugin.js]
-
----
-
-### What was wrong and what's fixed
-
-| Root cause | Fix |
-|---|---|
-| `create()` receives no args → `config` was `undefined` | `cfg()` lazily reads `api.config` on every call |
-| Auth code never captured — proxy auto-follows redirects, drops `weconnect://` scheme | Added body + JS-redirect fallback parsing for the code; handle `redirect: 'manual'` |
-| HTML login form was never properly parsed (wrong regex) | Regexes now match `name="x" value="y"` and also `value="y" name="x"` order |
-| Widget showed "Loading…" forever if agent had no data yet | Widget now reads DB immediately on mount; falls back to `svc.getLastReading()` |
-| Service silently threw on startup, showed as "not running" | `setTimeout(poll, 2000)` defers startup; all throws are caught and surfaced as status events |
-
-**After installing:** open DevTools → Console → filter `weconnect-agent` to watch each auth step live.
+Your credentials `fredrik@teamleader.se` will be tried on the first poll (2 seconds after install). Check the console logs — they're now labeled `[weconnect-agent]` at every step so we can pinpoint exactly where it breaks.
 
 ---
