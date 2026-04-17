@@ -6,240 +6,239 @@ api.registerService({
     vin: '',
     pollIntervalMinutes: 30
   },
-  hiddenConfig: {
-    _cachedTokens: null,
-    _lastReading: null
-  },
   events: {
-    'reading:new':   { description: 'New vehicle reading', schema: { vin: 'string', km: 'number', batteryPct: 'number', fuelPct: 'number', recorded_at: 'string' } },
-    'status:change': { description: 'Agent status changed', schema: { status: 'string', message: 'string' } }
+    'reading:new':   { description: 'New odometer/level reading stored', schema: { vin: 'string', odometer: 'number', level: 'number', levelType: 'string', timestamp: 'string' } },
+    'status:change': { description: 'Agent status update',              schema: { status: 'string', message: 'string' } }
   },
   create() {
-    const CLIENT_ID    = 'a24fba63-34b3-4d43-b181-942111e6bda8@apps_vw-dilab_com'
-    const REDIRECT_URI = 'weconnect://authenticated'
-    const IDENTITY     = 'https://identity.vwgroup.io'
-    const API_HOSTS    = [
-      'https://mobileapi.apps.emea.vwapps.io',
-      'https://msg.volkswagen.de/fs-car',
-      'https://emea.bff.cariad.digital'
-    ]
-    const SESSION_ID   = 'weconnect-agent:oauth'
-    const log = (...args) => console.log('[weconnect-agent]', ...args)
+    const SESSION  = 'weconnect-agent:auth'
+    const CLIENT   = 'a24fba63-34b3-4d43-b181-942111e6bda8@apps_vw-dilab_com'
+    const REDIRECT = 'weconnect://authenticated'
+    const IDENTITY = 'https://identity.vwgroup.io'
+    const MSGVW    = 'https://msg.volkswagen.de/fs-car'
+
     const cfg = () => api.config || {}
+    let tokens      = null   // { access_token, refresh_token, expires_at }
+    let pollTimer   = null
+    let lastReading = null
+    let lastStatus  = { status: 'idle', message: 'Not started' }
 
-    let state = { status: 'idle', message: '', lastReading: null }
-    let pollTimer = null
-
-    function setStatus(status, message = '') {
-      state.status = status
-      state.message = message
-      log(`status: ${status}${message ? ' — ' + message : ''}`)
-      api.emit('weconnect-agent:status:change', { status, message })
+    function emit(event, data) {
+      api.emit(`weconnect-agent:${event}`, data)
+      if (event === 'status:change') lastStatus = data
     }
 
+    function setStatus(status, message) {
+      console.log(`[weconnect-agent] ${status}: ${message}`)
+      emit('status:change', { status, message })
+    }
+
+    // --- PKCE ---
     async function generatePKCE() {
-      const bytes = crypto.getRandomValues(new Uint8Array(32))
-      const verifier = btoa(String.fromCharCode(...bytes))
-        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
-      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))
-      const challenge = btoa(String.fromCharCode(...new Uint8Array(digest)))
-        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
+      const arr      = crypto.getRandomValues(new Uint8Array(32))
+      const verifier = btoa(String.fromCharCode(...arr)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'')
+      const digest   = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))
+      const challenge = btoa(String.fromCharCode(...new Uint8Array(digest))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'')
       return { verifier, challenge }
     }
 
-    async function followRedirects(location, depth = 0) {
-      if (depth > 10) throw new Error('Too many redirects')
-      if (location.startsWith('weconnect://')) {
-        const u = new URL(location.replace('weconnect://', 'https://dummy/'))
-        const code = u.searchParams.get('code')
-        if (!code) throw new Error('No code in weconnect:// redirect')
-        log(`Got auth code at depth ${depth}`)
-        return code
-      }
-      const url = location.startsWith('http') ? location : `${IDENTITY}${location}`
-      log(`Follow redirect depth=${depth}: ${url.slice(0, 120)}`)
-      const r = await api.fetch(url, { session: SESSION_ID, redirect: 'manual' })
-      const loc = r.headers.get('location')
-      if (loc) return followRedirects(loc, depth + 1)
-      const body = await r.text()
-      const m = body.match(/weconnect:\/\/authenticated\?[^"'\s]+/)
-      if (m) return followRedirects(m[0], depth + 1)
-      throw new Error(`Redirect chain dead-end at depth ${depth}, status ${r.status}`)
-    }
+    // --- Auth ---
+    async function login() {
+      const { email, password } = cfg()
+      if (!email || !password) throw new Error('Email and password not configured')
 
-    async function authenticate() {
-      const c = cfg()
-      if (!c.email || !c.password) throw new Error('Set email and password in widget Settings')
-
-      setStatus('authenticating', 'Starting OAuth flow')
+      setStatus('polling', 'Authenticating…')
       const { verifier, challenge } = await generatePKCE()
+      const state = crypto.randomUUID()
 
+      // Step 1: GET authorize → extract form fields (session captures cookies)
       const authUrl = `${IDENTITY}/oidc/v1/authorize?` + new URLSearchParams({
-        client_id: CLIENT_ID, response_type: 'code', redirect_uri: REDIRECT_URI,
+        client_id: CLIENT, response_type: 'code', redirect_uri: REDIRECT,
         scope: 'openid profile address phone email mbb offline_access',
-        code_challenge: challenge, code_challenge_method: 'S256',
-        state: crypto.randomUUID()
+        code_challenge: challenge, code_challenge_method: 'S256', state
       })
-
-      log('Step 1: GET authorize')
-      const r1 = await api.fetch(authUrl, { session: SESSION_ID })
-      if (r1.status !== 200) throw new Error(`Authorize returned ${r1.status}`)
+      const r1 = await api.fetch(authUrl, { session: SESSION })
       const html1 = await r1.text()
-      const ulpState = html1.match(/name="state"\s+value="([^"]+)"/)?.[1]
-      if (!ulpState) throw new Error('Could not find ULP state token in login page')
-      log(`Step 1 ulpState: len=${ulpState.length}`)
+      console.log('[weconnect-agent] Step 1 status:', r1.status)
 
-      log('Step 2: POST /u/login')
-      const r2 = await api.fetch(`${IDENTITY}/u/login?state=${encodeURIComponent(ulpState)}`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          state: ulpState, username: c.email, password: c.password, action: 'default'
-        }).toString(),
-        session: SESSION_ID,
-        redirect: 'manual'
-      })
-      log(`Step 2 status: ${r2.status}`)
-      const loc = r2.headers.get('location')
+      const csrf       = html1.match(/name="_csrf"\s+value="([^"]+)"/)?.[1]
+               || html1.match(/value="([^"]+)"\s+name="_csrf"/)?.[1]
+      const relayState = html1.match(/name="relayState"\s+value="([^"]+)"/)?.[1]
+               || html1.match(/value="([^"]+)"\s+name="relayState"/)?.[1]
+      const hmac1      = html1.match(/name="hmac"\s+value="([^"]+)"/)?.[1]
+               || html1.match(/value="([^"]+)"\s+name="hmac"/)?.[1]
 
-      let code
-      if (loc) {
-        code = await followRedirects(loc)
-      } else {
-        const body = await r2.text()
-        const m = body.match(/weconnect:\/\/authenticated\?[^"'\s]+/)
-        if (m) code = await followRedirects(m[0])
-        else {
-          const err = body.match(/class="[^"]*error[^"]*"[^>]*>([^<]+)</)?.[1]
-          throw new Error(`Login failed${err ? ': ' + err.trim() : ' — no redirect, no code'}`)
+      console.log('[weconnect-agent] Step 1 fields:', { csrf: !!csrf, relayState: !!relayState, hmac: !!hmac1 })
+      if (!csrf || !relayState || !hmac1) throw new Error('Could not parse login form fields')
+
+      // Step 2: POST email → get new hmac (session carries cookies)
+      const r2 = await api.fetch(
+        `${IDENTITY}/signin-service/v1/${CLIENT}/login/identifier`,
+        { method: 'POST', session: SESSION,
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ _csrf: csrf, relayState, email, hmac: hmac1 }).toString()
         }
-      }
+      )
+      const html2 = await r2.text()
+      console.log('[weconnect-agent] Step 2 status:', r2.status)
 
-      log('Step 3: Exchange code for tokens')
-      const r3 = await api.fetch(`${IDENTITY}/oidc/v1/token`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      const hmac2 = html2.match(/name="hmac"\s+value="([^"]+)"/)?.[1]
+             || html2.match(/value="([^"]+)"\s+name="hmac"/)?.[1]
+      if (!hmac2) throw new Error('Could not parse password form — wrong email?')
+
+      // Step 3: POST password → proxy walks redirects, code in final Location
+      const r3 = await api.fetch(
+        `${IDENTITY}/signin-service/v1/${CLIENT}/login/authenticate`,
+        { method: 'POST', session: SESSION,
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ _csrf: csrf, relayState, email, password, hmac: hmac2 }).toString()
+        }
+      )
+      console.log('[weconnect-agent] Step 3 status:', r3.status, 'url:', r3.url)
+
+      // Final URL is weconnect://authenticated?code=... — normalise to parse
+      const finalUrl = r3.url || ''
+      const codeUrl  = finalUrl.replace('weconnect://', 'https://weconnect-dummy.local/')
+      const code     = new URL(codeUrl).searchParams.get('code')
+      if (!code) throw new Error(`No auth code in redirect. Final URL: ${finalUrl}`)
+
+      console.log('[weconnect-agent] Got auth code ✓')
+
+      // Step 4: exchange code for tokens
+      const r4 = await api.fetch(`${IDENTITY}/oidc/v1/token`, {
+        method: 'POST', session: SESSION,
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
           grant_type: 'authorization_code', code,
-          redirect_uri: REDIRECT_URI, client_id: CLIENT_ID, code_verifier: verifier
+          redirect_uri: REDIRECT, client_id: CLIENT, code_verifier: verifier
         }).toString()
       })
-      const tokens = await r3.json()
-      if (!tokens.access_token) throw new Error(`Token exchange failed: ${JSON.stringify(tokens)}`)
-      log(`Got access_token (expires in ${tokens.expires_in}s)`)
+      const tok = await r4.json()
+      console.log('[weconnect-agent] Token response keys:', Object.keys(tok))
+      if (!tok.access_token) throw new Error(`Token exchange failed: ${JSON.stringify(tok)}`)
 
-      tokens.expires_at = Date.now() + (tokens.expires_in - 60) * 1000
-      await api.updateConfig({ _cachedTokens: tokens })
-      setStatus('authenticated')
-      return tokens
-    }
-
-    async function getValidTokens() {
-      let tokens = cfg()._cachedTokens
-      if (tokens && tokens.expires_at > Date.now()) return tokens
-      if (tokens?.refresh_token) {
-        log('Refreshing token')
-        try {
-          const r = await api.fetch(`${IDENTITY}/oidc/v1/token`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/x-www-form-urlencoded' },
-            body: new URLSearchParams({
-              grant_type: 'refresh_token',
-              refresh_token: tokens.refresh_token,
-              client_id: CLIENT_ID
-            }).toString()
-          })
-          const fresh = await r.json()
-          if (fresh.access_token) {
-            fresh.expires_at = Date.now() + (fresh.expires_in - 60) * 1000
-            fresh.refresh_token = fresh.refresh_token || tokens.refresh_token
-            await api.updateConfig({ _cachedTokens: fresh })
-            return fresh
-          }
-        } catch (e) { log('Refresh failed:', e.message) }
+      tokens = {
+        access_token:  tok.access_token,
+        refresh_token: tok.refresh_token,
+        expires_at:    Date.now() + (tok.expires_in || 3600) * 1000
       }
-      return authenticate()
+      api.updateConfig({ _cachedTokens: tokens })
+      console.log('[weconnect-agent] Authenticated ✓')
     }
 
-    async function apiGet(path, token) {
-      for (const host of API_HOSTS) {
-        try {
-          const r = await api.fetch(`${host}${path}`, {
-            headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }
-          })
-          if (r.ok) return { host, data: await r.json() }
-          log(`${host}${path} → ${r.status}`)
-        } catch (e) { log(`${host} threw: ${e.message}`) }
-      }
-      throw new Error(`All API hosts failed for ${path}`)
-    }
-
-    async function poll() {
+    async function refreshTokens() {
+      if (!tokens?.refresh_token) { tokens = null; return }
       try {
-        setStatus('polling')
-        const tokens = await getValidTokens()
-
-        let vin = cfg().vin?.trim()
-        if (!vin) {
-          const { data } = await apiGet('/vehicles', tokens.access_token)
-          vin = data?.data?.[0]?.vin || data?.vehicles?.[0]?.vin || data?.[0]?.vin
-          if (!vin) throw new Error('No VIN found in vehicles response')
-          log(`Auto-detected VIN: ${vin}`)
-        }
-
-        const { data: status } = await apiGet(`/vehicles/${vin}/status`, tokens.access_token)
-
-        const findNum = (obj, keys) => {
-          if (!obj || typeof obj !== 'object') return null
-          for (const k of keys) if (typeof obj[k] === 'number') return obj[k]
-          for (const v of Object.values(obj)) {
-            const found = findNum(v, keys)
-            if (found !== null) return found
-          }
-          return null
-        }
-
-        const km         = findNum(status, ['mileageKm', 'mileage', 'odometer', 'km'])
-        const batteryPct = findNum(status, ['currentSOC_pct', 'stateOfCharge', 'batteryLevel', 'soc'])
-        const fuelPct    = findNum(status, ['currentFuelLevel_pct', 'fuelLevel', 'tankLevel'])
-
-        const reading = {
-          vin, km, batteryPct, fuelPct,
-          recorded_at: new Date().toISOString()
-        }
-        log('Reading:', reading)
-
-        try { await api.db.insert(reading) } catch (e) { log('DB insert failed:', e.message) }
-
-        state.lastReading = reading
-        await api.updateConfig({ _lastReading: reading })
-        api.emit('weconnect-agent:reading:new', reading)
-        setStatus('ok', `${km ?? '?'} km`)
+        const r = await api.fetch(`${IDENTITY}/oidc/v1/token`, {
+          method: 'POST', session: SESSION,
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            grant_type: 'refresh_token',
+            refresh_token: tokens.refresh_token,
+            client_id: CLIENT
+          }).toString()
+        })
+        const tok = await r.json()
+        if (!tok.access_token) throw new Error('Refresh failed')
+        tokens = { access_token: tok.access_token, refresh_token: tok.refresh_token || tokens.refresh_token, expires_at: Date.now() + (tok.expires_in || 3600) * 1000 }
+        api.updateConfig({ _cachedTokens: tokens })
+        console.log('[weconnect-agent] Token refreshed ✓')
       } catch (e) {
-        setStatus('error', e.message)
-        log('Poll failed:', e.message)
+        console.warn('[weconnect-agent] Refresh failed, will re-login:', e.message)
+        tokens = null
       }
     }
 
-    function schedule() {
-      if (pollTimer) clearInterval(pollTimer)
-      const mins = Math.max(5, cfg().pollIntervalMinutes || 30)
-      pollTimer = setInterval(poll, mins * 60 * 1000)
-      log(`Scheduled every ${mins} min`)
+    async function vwGet(path) {
+      if (!tokens || Date.now() > tokens.expires_at - 60_000) await refreshTokens()
+      if (!tokens) await login()
+      const res = await api.fetch(`${MSGVW}${path}`, {
+        headers: { Authorization: `Bearer ${tokens.access_token}`, Accept: 'application/json' }
+      })
+      if (res.status === 401) { tokens = null; await login(); return vwGet(path) }
+      return res.json()
     }
 
-    state.lastReading = cfg()._lastReading || null
-    setTimeout(() => { schedule(); poll() }, 2000)
+    // --- Poll ---
+    async function poll() {
+      const { vin, email, password } = cfg()
+      if (!email || !password) { setStatus('error', 'Email and password not configured'); return }
+
+      try {
+        setStatus('polling', 'Fetching vehicle data…')
+        if (!tokens) await login()
+
+        // Get vehicle list if no VIN configured
+        let activeVin = vin
+        if (!activeVin) {
+          const vdata = await vwGet('/v1/vehicles')
+          console.log('[weconnect-agent] Vehicles response:', JSON.stringify(vdata).slice(0, 200))
+          activeVin = vdata?.data?.[0]?.vin || vdata?.vehicles?.[0]?.vin
+          if (!activeVin) throw new Error('No VIN found — set one in config')
+          api.updateConfig({ vin: activeVin })
+        }
+
+        // Fetch status
+        const statusData = await vwGet(`/bs/vsr/v1/VW_PRD/vehicles/${activeVin}/status`)
+        console.log('[weconnect-agent] Status response:', JSON.stringify(statusData).slice(0, 300))
+
+        const vs = statusData?.StoredVehicleDataResponse?.vehicleData?.data || []
+
+        // odometer field id 0x0101010002
+        let odometer = null, level = null, levelType = 'fuel'
+        for (const group of vs) {
+          for (const field of group.field || []) {
+            if (field.id === '0x0101010002') odometer = parseFloat(field.value)
+            if (field.id === '0x030103000A') { level = parseFloat(field.value); levelType = 'fuel' }
+            if (field.id === '0x0301030002') { level = parseFloat(field.value); levelType = 'soc'  }
+          }
+        }
+
+        // Also try charging endpoint for EVs
+        if (level == null) {
+          try {
+            const chg = await vwGet(`/bs/batterycharge/v1/VW_PRD/vehicles/${activeVin}/chargestatus`)
+            const soc = chg?.chargeStatus?.stateOfCharge
+            if (soc != null) { level = parseFloat(soc); levelType = 'soc' }
+          } catch {}
+        }
+
+        const reading = { vin: activeVin, odometer, level, levelType, timestamp: new Date().toISOString() }
+        lastReading = reading
+
+        // Store in DB
+        try {
+          await api.db.insert({ vin: activeVin, odometer, level, level_type: levelType, recorded_at: reading.timestamp })
+        } catch (e) { console.warn('[weconnect-agent] DB insert failed:', e.message) }
+
+        emit('reading:new', reading)
+        setStatus('idle', `Updated ${new Date().toLocaleTimeString()}`)
+
+      } catch (e) {
+        console.error('[weconnect-agent] Poll error:', e.message)
+        setStatus('error', e.message)
+        tokens = null // force re-auth next time
+      }
+
+      // Schedule next poll
+      const mins = Math.max(5, cfg().pollIntervalMinutes || 30)
+      pollTimer = setTimeout(poll, mins * 60 * 1000)
+    }
+
+    // Restore cached tokens if available
+    const cached = cfg()._cachedTokens
+    if (cached?.access_token && cached?.expires_at > Date.now()) {
+      tokens = cached
+      console.log('[weconnect-agent] Restored cached tokens ✓')
+    }
+
+    // Start polling after short delay
+    setTimeout(poll, 2000)
 
     return {
-      poll,
-      getStatus: () => ({ ...state }),
-      getLastReading: () => state.lastReading,
-      async getHistory(limit = 30) {
-        try {
-          return await api.db.query({}, { orderBy: 'recorded_at', ascending: false, limit })
-        } catch { return [] }
-      }
+      getLastReading: () => lastReading,
+      getStatus:      () => lastStatus,
+      pollNow:        () => { clearTimeout(pollTimer); setTimeout(poll, 0) }
     }
   }
 })
