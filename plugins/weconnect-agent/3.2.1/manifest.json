@@ -1,0 +1,14 @@
+{
+  "pluginId": "fe3081d6-58ba-476f-b51b-9bd9e8fd75a8",
+  "name": "Weconnect Agent",
+  "description": "",
+  "version": "3.2.1",
+  "types": [
+    "weconnect-vehicle-tracker"
+  ],
+  "serviceTypes": [
+    "weconnect-agent",
+    "weconnect-diag"
+  ],
+  "savedAt": "2026-04-17T18:26:50.453Z"
+}
